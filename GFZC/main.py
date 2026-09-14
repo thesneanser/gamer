@@ -1,17 +1,40 @@
 import pygame
-import random
+import numpy as np
 import math
 import os
 
-pygame.init()
-
 WIDTH = 800
 HEIGHT = 600
+WINDOW_TITLE = ""
+FRAME_RATE = 100
+
+STARTING_CREDITS = 14
+STARTING_DEADLINE_COST = 75
+STARTING_SPINS = 5
+STARTING_ROUNDS = 3
+SPIN_COST = 0
+HIGHLIGHT_DURATION = 0.35
+JACKPOT_HIGHLIGHT_SPEED = 0.50
+
+GRID_COLS = 5
+GRID_ROWS = 3
+GRID_SPACING_X = 70
+GRID_SPACING_Y = 60
+GRID_CENTER_X = 370
+GRID_CENTER_Y = 300
+GRID_X = GRID_CENTER_X - ((GRID_COLS - 1) * GRID_SPACING_X / 2) + np.arange(GRID_COLS) * GRID_SPACING_X
+GRID_Y = GRID_CENTER_Y - ((GRID_ROWS - 1) * GRID_SPACING_Y / 2) + np.arange(GRID_ROWS) * GRID_SPACING_Y
+
+pygame.init()
 display = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("")
+pygame.display.set_caption(WINDOW_TITLE)
 
 clock = pygame.time.Clock()
 running = True
+
+
+cheats_enabled = True
+
 
 handle = pygame.Rect(100, 100, 50, 50)
 dragging = False
@@ -19,10 +42,27 @@ drag_offset = (0, 0)
 current_screen = 1
 Aspin = False
 wait_spin = 0
-current_credits = 7
+current_credits = STARTING_CREDITS
 input_debt_amount = 1
 debt_credits = 0
-current_deadline_cost = 75
+current_deadline_cost = STARTING_DEADLINE_COST
+debug_overlay = False
+spin_active = False
+spin_progress = 0.1
+spin_frame = 0
+highlighted_positions = set()
+highlight_timer = 0.0
+highlight_sequence = []
+highlight_pattern_names = []
+highlight_index = 0
+current_highlight_duration = HIGHLIGHT_DURATION
+jackpot_highlight_speed = JACKPOT_HIGHLIGHT_SPEED
+remain_spins = STARTING_SPINS
+spin_cost = SPIN_COST
+remain_round = STARTING_ROUNDS
+symbol_matrix = [[], [], []]
+
+asset_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 
 
 # symbols
@@ -67,6 +107,8 @@ pattern_multipliers = {
 	"EYE": 8,
 	"JACKPOT": 10,
 }
+score_multiplier = 1
+pattern_score_multiplier = 1
 symbol_colours = {
 	JB: (50, 50, 50),
 	TM: (150, 50, 50),
@@ -77,7 +119,45 @@ symbol_colours = {
 	RT: (50, 50, 20),
 }
 
-asset_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+cheat_fields = [
+	("score", None),
+	("pattern_score", None),
+	*(("chance", symbol) for symbol in symbols),
+	*(("symbol_value", symbol) for symbol in symbols),
+	*(("pattern", pattern_name) for pattern_name in pattern_multipliers),
+]
+cheat_selected_field = 0
+cheat_input_active = False
+cheat_input_text = ""
+
+
+def get_cheat_value(field):
+	field_type, key = field
+	if field_type == "score":
+		return score_multiplier
+	if field_type == "pattern_score":
+		return pattern_score_multiplier
+	if field_type == "chance":
+		return weights[symbols.index(key)]
+	if field_type == "symbol_value":
+		return symbol_values[key]
+	return pattern_multipliers[key]
+
+
+def set_cheat_value(field, value):
+	global score_multiplier, pattern_score_multiplier
+	field_type, key = field
+	value = max(0, int(value))
+	if field_type == "score":
+		score_multiplier = value
+	elif field_type == "pattern_score":
+		pattern_score_multiplier = value
+	elif field_type == "chance":
+		weights[symbols.index(key)] = value
+	elif field_type == "symbol_value":
+		symbol_values[key] = value
+	else:
+		pattern_multipliers[key] = value
 
 
 def load_symbol_image(symbol):
@@ -100,7 +180,6 @@ def load_symbol_image(symbol):
 
 
 symbol_images = {symbol: load_symbol_image(symbol) for symbol in symbols}
-symbol_matrix = [[], [], []]
 
 patterns = {
 	"JACKPOT": [[(0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (1, 0), (1, 1), (1, 2), (1, 3), (1, 4), (2, 0), (2, 1), (2, 2), (2, 3), (2, 4)]],
@@ -148,9 +227,37 @@ class Button:
 		return False
 
 
+def draw_debug_overlay(surface, symbol_matrix):
+	font = pygame.font.Font(None, 22)
+	lines = [
+		f"screen: {current_screen}",
+		f"credits: {current_credits}  debt: {debt_credits}",
+		f"spins: {remain_spins}  rounds: {remain_round}",
+		f"spin: {spin_active}  progress: {spin_progress:.2f}",
+		f"handle: ({handle.x}, {handle.y})",
+		f"wait: {wait_spin:.1f}  Aspin: {Aspin}",
+		f"matrix: {' '.join(''.join(row) for row in symbol_matrix)}",
+		f"symbol values x{score_multiplier}",
+		f"pattern values x{pattern_score_multiplier}",
+		f"chances: {' '.join(f'{symbol}:{weights[index]}' for index, symbol in enumerate(symbols))}",
+		f"symbol values: {' '.join(f'{symbol}:{symbol_values[symbol]}' for symbol in symbols)}",
+		f"patterns: {' '.join(f'{name}:{value}' for name, value in pattern_multipliers.items())}",
+	]
+	padding = 8
+	line_height = font.get_linesize()
+	width = max(font.size(line)[0] for line in lines) + padding * 2
+	height = line_height * len(lines) + padding * 2
+	panel = pygame.Surface((width, height), pygame.SRCALPHA)
+	panel.fill((0, 0, 0, 205))
+	for index, line in enumerate(lines):
+		text = font.render(line, True, (230, 240, 255))
+		panel.blit(text, (padding, padding + index * line_height))
+	surface.blit(panel, (WIDTH - width - 12, 12))
+
+
 print_debt_button = Button(WIDTH // 2 - 100, HEIGHT // 2 - 30, 200, 60, "Print Debt")
-high_ticket = Button(20, 20, 120, 50, "")
-low_ticket = Button(20, 80, 120, 50, "")
+high_ticket = Button(220, 275, 150, 50, "3 Spins")
+low_ticket = Button(430, 275, 150, 50, "7 Spins")
 
 def find_matching_patterns(symbol_matrix):
 	matches = []
@@ -194,69 +301,50 @@ def find_matching_patterns(symbol_matrix):
 
 
 def calculate_score(matches):
+	adjusted_symbol_values = {
+		symbol: value * score_multiplier
+		for symbol, value in symbol_values.items()
+	}
+	adjusted_pattern_multipliers = {
+		pattern_name: value * pattern_score_multiplier
+		for pattern_name, value in pattern_multipliers.items()
+	}
 	return sum(
-		symbol_values[symbol] * pattern_multipliers[pattern_name]
+		adjusted_symbol_values[symbol] * adjusted_pattern_multipliers[pattern_name]
 		for pattern_name, symbol, _ in matches
 	)
 
-grid_x = [230, 300, 370, 440, 510]
-grid_y = [240, 300, 360]
-spin_active = False
-spin_progress = 0.0
-spin_frame = 0
-highlighted_positions = set()
-highlight_timer = 0.0
-highlight_sequence = []
-highlight_pattern_names = []
-highlight_index = 0
-highlight_duration = 0.35
-jackpot_highlight_speed = 0.50
-current_highlight_duration = highlight_duration
-remain_spins = 5
-spin_cost = 7
-remain_round = 3
+def draw_slot_symbol(surface, symbol, x, y, highlight_strength=0.0, size=0.50):
+	image = symbol_images[symbol]
 
+	pulse_strength = max(0.0, min(1.0, highlight_strength))
+	symbol_size = max(12, int(100 * size * (1.0 + 0.12 * pulse_strength)))
 
-def draw_slot_symbol(surface, symbol, x, y, spin_amount, highlight_strength=0.0, size=0.35):
-    image = symbol_images[symbol]
+	scaled_image = pygame.transform.smoothscale(
+		image,
+		(symbol_size, symbol_size)
+	)
 
-    pulse = 1.0 + 0.15 * math.sin(spin_amount * 16.0 + x * 0.08) + 0.1 * highlight_strength
-    spin_rotation = spin_amount * 1080.0
+	rect = scaled_image.get_rect(center=(x, y))
 
-    base_size = image.get_size()
+	surface.blit(scaled_image, rect)
 
-    scaled_width = max(12, int(base_size[0] * pulse * size))
-    scaled_height = max(12, int(base_size[1] * pulse * size))
-
-    scaled_image = pygame.transform.smoothscale(
-        image,
-        (scaled_width, scaled_height)
-    )
-
-    rotated = pygame.transform.rotate(scaled_image, spin_rotation)
-
-    rect = rotated.get_rect(
-        center=(x, y + math.sin(spin_amount * 12.0 + x * 0.1) * 4)
-    )
-
-    surface.blit(rotated, rect)
-
-    if highlight_strength > 0:
-        lightened = rotated.copy()
-        lightened.fill(
-            (
-                int(110 * highlight_strength),
-                int(110 * highlight_strength),
-                int(110 * highlight_strength),
-                0
-            ),
-            special_flags=pygame.BLEND_RGBA_ADD
-        )
-        surface.blit(lightened, rect)
+	if highlight_strength > 0:
+		lightened = scaled_image.copy()
+		lightened.fill(
+			(
+				int(110 * highlight_strength),
+				int(110 * highlight_strength),
+				int(110 * highlight_strength),
+				0
+			),
+			special_flags=pygame.BLEND_RGBA_ADD
+		)
+		surface.blit(lightened, rect)
 
 
 def main():
-	global running, dragging, handle, current_screen, Aspin, wait_spin, symbol_matrix, spin_active, spin_progress, spin_frame, highlighted_positions, highlight_timer, highlight_sequence, highlight_pattern_names, highlight_index, current_highlight_duration, jackpot_highlight_speed, current_credits, input_debt_amount, debt_credits, current_deadline_cost, remain_spins, spin_cost, remain_round
+	global running, dragging, handle, current_screen, Aspin, wait_spin, symbol_matrix, spin_active, spin_progress, spin_frame, highlighted_positions, highlight_timer, highlight_sequence, highlight_pattern_names, highlight_index, current_highlight_duration, jackpot_highlight_speed, current_credits, input_debt_amount, debt_credits, current_deadline_cost, remain_spins, spin_cost, remain_round, debug_overlay, cheat_selected_field, cheat_input_active, cheat_input_text
 
 	while running:
 		mx, my = pygame.mouse.get_pos()
@@ -271,7 +359,7 @@ def main():
 				if highlight_index < len(highlight_sequence):
 					highlighted_positions = highlight_sequence[highlight_index]
 					if highlight_pattern_names[highlight_index] == "JACKPOT":
-						current_highlight_duration = highlight_duration / jackpot_highlight_speed
+						current_highlight_duration = HIGHLIGHT_DURATION / jackpot_highlight_speed
 					else:
 						current_highlight_duration = max(0.12, current_highlight_duration * 0.9)
 					highlight_timer = current_highlight_duration
@@ -283,8 +371,9 @@ def main():
 		if spin_active:
 			spin_frame += 1
 			if spin_frame % 2 == 0:
+				symbol_weights = np.array(weights, dtype=float)
 				symbol_matrix = [
-					random.choices(symbols, weights=weights, k=5)
+					list(np.random.choice(symbols, size=5, p=symbol_weights / symbol_weights.sum()))
 					for _ in range(3)
 				]
 			spin_progress += 0.02
@@ -298,7 +387,7 @@ def main():
 				highlight_pattern_names = [pattern_name for pattern_name, _, _ in matches]
 				highlight_index = 0
 				highlighted_positions = highlight_sequence[0] if highlight_sequence else set()
-				current_highlight_duration = highlight_duration / jackpot_highlight_speed if matches and matches[0][0] == "JACKPOT" else highlight_duration
+				current_highlight_duration = HIGHLIGHT_DURATION / jackpot_highlight_speed if matches and matches[0][0] == "JACKPOT" else HIGHLIGHT_DURATION
 				highlight_timer = current_highlight_duration if matches else 0.0
 				if matches:
 					score = calculate_score(matches)
@@ -317,12 +406,14 @@ def main():
 			for event in pygame.event.get():
 				if event.type == pygame.QUIT:
 					running = False
+				elif event.type == pygame.KEYDOWN and event.key == pygame.K_f:
+					debug_overlay = not debug_overlay
 				elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
 					if event.pos[0] > 700:
 						current_screen = 2
 						dragging = False
 
-					if remain_spins == 0:
+					if remain_spins == 0 and Aspin and not spin_active:
 						if high_ticket.clicked(event.pos):
 							remain_spins = 3
 							current_credits -= spin_cost
@@ -358,8 +449,9 @@ def main():
 					Aspin = True
 
 			elif handle.y > 375 and Aspin and not spin_active:
+				symbol_weights = np.array(weights, dtype=float)
 				symbol_matrix = [
-					random.choices(symbols, weights=weights, k=5)
+					list(np.random.choice(symbols, size=5, p=symbol_weights / symbol_weights.sum()))
 					for _ in range(3)
 				]
 				spin_active = True
@@ -369,7 +461,7 @@ def main():
 				highlight_timer = 0.0
 				highlight_sequence = []
 				highlight_index = 0
-				current_highlight_duration = highlight_duration
+				current_highlight_duration = HIGHLIGHT_DURATION
 				Aspin = False
 				remain_spins -= 1
 
@@ -379,8 +471,8 @@ def main():
 
 			for row, column_symbols in enumerate(symbol_matrix):
 				for column, symbol in enumerate(column_symbols):
-					base_x = grid_x[column]
-					base_y = grid_y[row]
+					base_x = GRID_X[column]
+					base_y = GRID_Y[row]
 					highlight_progress = (current_highlight_duration - highlight_timer) / current_highlight_duration
 					if (row, column) in highlighted_positions:
 						if highlight_progress < 0.25:
@@ -394,22 +486,92 @@ def main():
 					if spin_active:
 						draw_slot_symbol(display, symbol, base_x, base_y, 0)
 					else:
-						draw_slot_symbol(display, symbol, base_x, base_y, 0.0, highlight_strength)
+						draw_slot_symbol(display, symbol, base_x, base_y, highlight_strength=highlight_strength)
 
-			if remain_spins == 0:
-				pygame.draw.rect(display, (0, 0, 0), display.get_rect())
+			if remain_spins == 0 and Aspin and not spin_active:
+				matrix_panel = pygame.Rect(180, 190, 440, 220)
+				pygame.draw.rect(display, (0, 0, 0), matrix_panel)
+				pygame.draw.rect(display, (120, 120, 120), matrix_panel, 2)
 				high_ticket.draw(display, (mx, my))
 				low_ticket.draw(display, (mx, my))
 
+			if debug_overlay:
+				draw_debug_overlay(display, symbol_matrix)
 
 			pygame.display.flip()
-			clock.tick(100)
+			clock.tick(FRAME_RATE)
+
+
+		def draw_cheat_page(surface, mouse_position):
+			surface.fill((24, 28, 38))
+			title_font = pygame.font.Font(None, 38)
+			label_font = pygame.font.Font(None, 26)
+			small_font = pygame.font.Font(None, 22)
+			selected_colour = (255, 210, 80)
+			text_colour = (235, 240, 250)
+
+			title = title_font.render("CHEAT PAGE", True, text_colour)
+			surface.blit(title, (40, 20))
+			instructions = small_font.render("Click a value, type a number, then press Enter. Esc cancels.", True, (170, 180, 195))
+			surface.blit(instructions, (40, 52))
+
+			selected_field = cheat_fields[cheat_selected_field]
+			if cheat_input_active:
+				selected_text = cheat_input_text or "_"
+			else:
+				selected_text = str(get_cheat_value(selected_field))
+			multiplier_text = label_font.render(f"Symbol value multiplier: {selected_text if selected_field[0] == 'score' else score_multiplier}", True, selected_colour if selected_field[0] == "score" else text_colour)
+			surface.blit(multiplier_text, (40, 92))
+			pattern_multiplier_text = label_font.render(f"Pattern value multiplier: {selected_text if selected_field[0] == 'pattern_score' else pattern_score_multiplier}", True, selected_colour if selected_field[0] == "pattern_score" else text_colour)
+			surface.blit(pattern_multiplier_text, (40, 116))
+
+			left_x = 40
+			right_x = 430
+			row_y = 140
+			row_height = 34
+			header = label_font.render("SYMBOLS", True, (120, 200, 255))
+			surface.blit(header, (left_x, row_y))
+			header = label_font.render("PATTERN MULTIPLIERS", True, (120, 200, 255))
+			surface.blit(header, (right_x, row_y))
+
+			for row, symbol in enumerate(symbols):
+				y = row_y + 34 + row * row_height
+				for field_type, label, value, x, width in (
+					("chance", f"{symbol} chance", weights[row], left_x, 175),
+					("symbol_value", f"{symbol} value", symbol_values[symbol], left_x + 190, 150),
+				):
+					field_index = cheat_fields.index((field_type, symbol))
+					rect = pygame.Rect(x, y, width, 32)
+					colour = (70, 75, 90) if field_index != cheat_selected_field else selected_colour
+					pygame.draw.rect(surface, colour, rect)
+					value_colour = (20, 24, 32) if field_index == cheat_selected_field else text_colour
+					field_text = f"{label}: {value}"
+					if field_index == cheat_selected_field and cheat_input_active:
+						field_text = f"{label}: {cheat_input_text or '_'}"
+					surface.blit(small_font.render(field_text, True, value_colour), (x + 8, y + 6))
+
+			for row, pattern_name in enumerate(pattern_multipliers):
+				y = row_y + 34 + row * row_height
+				field_index = cheat_fields.index(("pattern", pattern_name))
+				rect = pygame.Rect(right_x, y, 310, 32)
+				colour = (70, 75, 90) if field_index != cheat_selected_field else selected_colour
+				value_colour = (20, 24, 32) if field_index == cheat_selected_field else text_colour
+				field_text = f"{pattern_name}: {pattern_multipliers[pattern_name]}"
+				if field_index == cheat_selected_field and cheat_input_active:
+					field_text = f"{pattern_name}: {cheat_input_text or '_'}"
+				pygame.draw.rect(surface, colour, rect)
+				surface.blit(small_font.render(field_text, True, value_colour), (right_x + 8, y + 6))
+
+			back_text = label_font.render("< Back", True, text_colour)
+			surface.blit(back_text, (700, 20))
 
 	#--------------------debt screen--------------------
 		if current_screen == 2:
 			for event in pygame.event.get():
 				if event.type == pygame.QUIT:
 					running = False
+				elif event.type == pygame.KEYDOWN and event.key == pygame.K_f:
+					debug_overlay = not debug_overlay
 				elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
 					if event.pos[0] > 700:
 						current_screen = 3
@@ -437,24 +599,88 @@ def main():
 
 			display.fill((30, 90, 30))
 			print_debt_button.draw(display, (mx, my))
+			if debug_overlay and cheats_enabled:
+				draw_debug_overlay(display, symbol_matrix)
 
 			pygame.display.flip()
-			clock.tick(100)
+			clock.tick(FRAME_RATE)
 
-	#--------------------charm buy screen--------------------
+	#-------------------charm buy screen--------------------
 		if current_screen == 3:
 			for event in pygame.event.get():
 				if event.type == pygame.QUIT:
 					running = False
+				elif event.type == pygame.KEYDOWN and event.key == pygame.K_f:
+					debug_overlay = not debug_overlay
 				elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+					if event.pos[0] > 700:
+						current_screen = 4
+						dragging = False
 					if event.pos[0] < 300:
 						current_screen = 2
 						dragging = False
 
-			display.fill((30, 30, 30))
+			display.fill((90, 30, 30))
+			if debug_overlay and cheats_enabled:
+				draw_debug_overlay(display, symbol_matrix)
 
 			pygame.display.flip()
-			clock.tick(100)
+			clock.tick(FRAME_RATE)
+
+	#--------------------cheats--------------------
+		if current_screen == 4 and cheats_enabled:
+			for event in pygame.event.get():
+				if event.type == pygame.QUIT:
+					running = False
+				elif event.type == pygame.KEYDOWN and event.key == pygame.K_f:
+					debug_overlay = not debug_overlay
+				elif event.type == pygame.TEXTINPUT and cheat_input_active:
+					cheat_input_text += "".join(character for character in event.text if character.isdigit())
+				elif event.type == pygame.KEYDOWN:
+					if event.key == pygame.K_ESCAPE:
+						cheat_input_active = False
+						cheat_input_text = ""
+					elif event.key == pygame.K_BACKSPACE and cheat_input_active:
+						cheat_input_text = cheat_input_text[:-1]
+					elif event.key == pygame.K_RETURN and cheat_input_active:
+						if cheat_input_text:
+							set_cheat_value(cheat_fields[cheat_selected_field], cheat_input_text)
+						cheat_input_active = False
+						cheat_input_text = ""
+				elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+					if event.pos[0] > 690 and event.pos[1] < 80:
+						current_screen = 3
+						dragging = False
+						cheat_input_active = False
+					elif pygame.Rect(40, 88, 360, 25).collidepoint(event.pos):
+						cheat_selected_field = 0
+						cheat_input_active = True
+						cheat_input_text = ""
+					elif pygame.Rect(40, 112, 360, 25).collidepoint(event.pos):
+						cheat_selected_field = 1
+						cheat_input_active = True
+						cheat_input_text = ""
+					else:
+						for row, symbol in enumerate(symbols):
+							y = 174 + row * 34
+							for field_type, x, width in (("chance", 40, 175), ("symbol_value", 230, 150)):
+								if pygame.Rect(x, y, width, 32).collidepoint(event.pos):
+									cheat_selected_field = cheat_fields.index((field_type, symbol))
+									cheat_input_active = True
+									cheat_input_text = ""
+						for row, pattern_name in enumerate(pattern_multipliers):
+							y = 174 + row * 34
+							if pygame.Rect(430, y, 310, 32).collidepoint(event.pos):
+								cheat_selected_field = cheat_fields.index(("pattern", pattern_name))
+								cheat_input_active = True
+								cheat_input_text = ""
+
+			draw_cheat_page(display, (mx, my))
+			if debug_overlay and cheats_enabled:
+				draw_debug_overlay(display, symbol_matrix)
+
+			pygame.display.flip()
+			clock.tick(FRAME_RATE)
 
 	pygame.quit()
 
